@@ -541,7 +541,7 @@ def find_regular_font() -> Path | None:
 
 
 CAPTION_FONT = Path(__file__).resolve().parent / "fonts" / "caption" / "TikTokSans.ttf"
-CAPTION_WEIGHT = 600                                  # SemiBold
+CAPTION_WEIGHT = 400                                  # Regular (user asked for not bold)
 
 
 def caption_font(size: int):
