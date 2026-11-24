@@ -301,9 +301,37 @@ def _cookie_file() -> Path | None:
     return _cookie_path
 
 
+# When YouTube says "confirm you're not a bot", other YouTube apps (TV, Safari, phone)
+# often still work. The one that worked last is tried first next time.
+_CLIENT_CHOICES: list[list[str] | None] = [None, ["tv"], ["android_vr"], ["web_safari"], ["mweb"]]
+_good_client: list[str] | None = None
+BOT_BLOCK_MSG = ("YouTube is blocking this server right now (its \"confirm you're not a bot\" check). "
+                 "Try again in a few minutes. If it keeps happening, the YouTube login on the server "
+                 "has probably expired and needs refreshing - or use the laptop version.")
+
+
+def _is_bot_block(err: Exception) -> bool:
+    low = str(err).lower()
+    return "not a bot" in low or "sign in to confirm" in low
+
+
+def _client_order() -> list[list[str] | None]:
+    order = list(_CLIENT_CHOICES)
+    if _good_client in order:
+        order.remove(_good_client)
+        order.insert(0, _good_client)
+    return order
+
+
+def _client_opts(clients: list[str] | None) -> dict:
+    return {"extractor_args": {"youtube": {"player_client": clients}}} if clients else {}
+
+
 def explain_ytdlp_error(err: Exception) -> str:
     msg = str(err)
     low = msg.lower()
+    if _is_bot_block(err):
+        return BOT_BLOCK_MSG
     if "private video" in low:
         return "This video is private."
     if "age" in low and ("confirm your age" in low or "age-restricted" in low or "inappropriate" in low):
@@ -358,12 +386,23 @@ def fetch_info(video_id: str) -> VideoInfo:
         hit = _info_cache.get(video_id)
         if hit and time.time() - hit[0] < INFO_CACHE_SECONDS:
             return hit[1]
+    global _good_client
     url = f"https://www.youtube.com/watch?v={video_id}"
-    try:
-        with yt_dlp.YoutubeDL(_ydl_opts(skip_download=True, format=FORMAT_SELECTOR)) as ydl:
-            info = ydl.sanitize_info(ydl.extract_info(url, download=False))
-    except yt_dlp.utils.DownloadError as e:
-        raise UserError(explain_ytdlp_error(e)) from None
+    first_err = None
+    for clients in _client_order():
+        try:
+            with yt_dlp.YoutubeDL(_ydl_opts(skip_download=True, format=FORMAT_SELECTOR,
+                                            **_client_opts(clients))) as ydl:
+                info = ydl.sanitize_info(ydl.extract_info(url, download=False))
+            _good_client = clients
+            break
+        except yt_dlp.utils.DownloadError as e:
+            first_err = first_err or e
+            if not _is_bot_block(first_err):
+                raise UserError(explain_ytdlp_error(e)) from None
+            # blocked: try the next YouTube app
+    else:
+        raise UserError(explain_ytdlp_error(first_err))
     if info.get("is_live"):
         raise UserError("This is a live stream that's still running; wait until it has ended.")
     result = VideoInfo(id=video_id, title=info.get("title") or video_id,
@@ -390,29 +429,47 @@ def download_section(info: VideoInfo, start: float, end: float, workdir: Path,
     sec_end = end + PAD_SECONDS
     if info.duration:
         sec_end = min(sec_end, info.duration)
-    opts = _ydl_opts(
-        format=FORMAT_SELECTOR,
-        merge_output_format="mp4",
-        outtmpl=str(workdir / "source.%(ext)s"),
-        paths={"home": str(workdir), "temp": str(workdir)},
-    )
-    if not whole:
-        opts["download_ranges"] = download_range_func(None, [(sec_start, sec_end)])
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            if info.raw:
-                try:      # reuse the details we already have (saves ~5 s)
-                    ydl.process_ie_result(copy.deepcopy(info.raw), download=True)
-                except yt_dlp.utils.DownloadError:
-                    # cached stream links may have expired: ask YouTube again
-                    _clear_partial(workdir)
-                    with _info_lock:
-                        _info_cache.pop(info.id, None)
+    global _good_client
+
+    def opts_for(clients):
+        o = _ydl_opts(
+            format=FORMAT_SELECTOR,
+            merge_output_format="mp4",
+            outtmpl=str(workdir / "source.%(ext)s"),
+            paths={"home": str(workdir), "temp": str(workdir)},
+            **_client_opts(clients),
+        )
+        if not whole:
+            o["download_ranges"] = download_range_func(None, [(sec_start, sec_end)])
+        return o
+
+    done = False
+    if info.raw:
+        try:      # reuse the details we already have (saves ~5 s)
+            with yt_dlp.YoutubeDL(opts_for(_good_client)) as ydl:
+                ydl.process_ie_result(copy.deepcopy(info.raw), download=True)
+            done = True
+        except yt_dlp.utils.DownloadError:
+            # cached stream links may have expired or been refused: ask YouTube again
+            _clear_partial(workdir)
+            with _info_lock:
+                _info_cache.pop(info.id, None)
+    if not done:
+        first_err = None
+        for clients in _client_order():
+            try:
+                with yt_dlp.YoutubeDL(opts_for(clients)) as ydl:
                     ydl.download([info.url])
-            else:
-                ydl.download([info.url])
-    except yt_dlp.utils.DownloadError as e:
-        raise UserError(explain_ytdlp_error(e)) from None
+                _good_client = clients
+                break
+            except yt_dlp.utils.DownloadError as e:
+                _clear_partial(workdir)
+                first_err = first_err or e
+                if not _is_bot_block(first_err):
+                    raise UserError(explain_ytdlp_error(e)) from None
+                # blocked: try the next YouTube app
+        else:
+            raise UserError(explain_ytdlp_error(first_err))
     files = [p for p in workdir.iterdir()
              if p.name.startswith("source") and p.suffix.lower() in (".mp4", ".mkv", ".webm", ".m4v")]
     if not files:
