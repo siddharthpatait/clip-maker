@@ -18,6 +18,7 @@ COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt deno
 
 COPY --chown=user ytcrop.py web.py web_page.html login_page.html ./
+COPY --chown=user fonts ./fonts
 
 EXPOSE 10000
 # Get the newest yt-dlp on each start (YouTube changes often), then run.

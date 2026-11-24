@@ -540,6 +540,46 @@ def find_regular_font() -> Path | None:
     return next((p for p in candidates if p.is_file()), None)
 
 
+CAPTION_FONT = Path(__file__).resolve().parent / "fonts" / "caption" / "TikTokSans.ttf"
+CAPTION_WEIGHT = 600                                  # SemiBold
+
+
+def caption_font(size: int):
+    """TikTok Sans SemiBold (bundled, OFL licence); falls back to a system sans."""
+    from PIL import ImageFont
+    if CAPTION_FONT.is_file():
+        try:
+            font = ImageFont.truetype(str(CAPTION_FONT), size)
+            axes = font.get_variation_axes()
+            vals = []
+            for a in axes:
+                name = a["name"].decode() if isinstance(a["name"], bytes) else a["name"]
+                vals.append(CAPTION_WEIGHT if name == "Weight" else a["default"])
+            font.set_variation_by_axes(vals)
+            return font
+        except Exception:
+            pass
+    fpath = find_regular_font()
+    return ImageFont.truetype(str(fpath), size) if fpath else ImageFont.load_default(size)
+
+
+def detect_bars(source: Path, offset: float, duration: float, workdir: Path,
+                width: int, height: int) -> tuple[int, int, int, int] | None:
+    """Find black bars baked into the video. Returns crop (w, h, x, y) or None."""
+    run = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-ss", f"{offset:.3f}", "-t", f"{min(duration, 30):.3f}",
+         "-i", source.name, "-vf", "fps=2,cropdetect=limit=24:round=2:reset=0", "-an", "-f", "null", "-"],
+        cwd=workdir, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    found = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", run.stderr)
+    if not found:
+        return None
+    w, h, x, y = map(int, found[-1])
+    # ignore tiny trims and nonsense (e.g. an all-black clip)
+    if w < width * 0.4 or h < height * 0.4 or (width - w) + (height - h) < max(width, height) * 0.02:
+        return None
+    return w, h, x, y
+
+
 def _emoji_start(cp: int, nxt: int) -> bool:
     if 0x1F000 <= cp <= 0x1FAFF:
         return True
@@ -608,7 +648,7 @@ def white_layout(src_w: int, src_h: int, hook: str, workdir: Path) -> tuple[int,
     W = 1080 if MAX_HEIGHT >= 1080 else 720
     H = W * 16 // 9
     margin = round(W * 0.074)
-    size = round(W * 0.053)
+    size = round(W * 0.055)
     line_h = round(size * 1.38)
     gap = round(W * 0.035)
     top_min = round(H * 0.11)                         # keep clear of Instagram's top bar
@@ -616,9 +656,7 @@ def white_layout(src_w: int, src_h: int, hook: str, workdir: Path) -> tuple[int,
     lines: list[list[tuple[bool, str, object]]] = []
     font = None
     if hook.strip():
-        from PIL import ImageFont
-        fpath = find_regular_font()
-        font = ImageFont.truetype(str(fpath), size) if fpath else ImageFont.load_default(size)
+        font = caption_font(size)
         e_size = round(size * 0.95)
         e_adv = e_size + round(size * 0.1)
 
@@ -682,8 +720,9 @@ def white_layout(src_w: int, src_h: int, hook: str, workdir: Path) -> tuple[int,
     return W, H, {"w": vw, "h": vh, "x": vx, "y": vy, "caption": bool(lines)}
 
 
-def build_white_filter(src: dict, W: int, H: int, box: dict) -> str:
-    chain = (f"[0:v]scale={box['w']}:{box['h']},setsar=1,"
+def build_white_filter(src: dict, W: int, H: int, box: dict, crop=None) -> str:
+    chain = "[0:v]" + (f"crop={crop[0]}:{crop[1]}:{crop[2]}:{crop[3]}," if crop else "")
+    chain += (f"scale={box['w']}:{box['h']},setsar=1,"
              f"pad={W}:{H}:{box['x']}:{box['y']}:color=white")
     if src["fps"] > 30.5:
         chain += ",fps=30"
@@ -700,11 +739,13 @@ def render(source: Path, offset: float, duration: float, out_path: Path, workdir
     white = reel == "white"
     if white:
         reel = False
+        crop = detect_bars(source, offset, duration, workdir, src["width"], src["height"])
+        vid_w, vid_h = (crop[0], crop[1]) if crop else (src["width"], src["height"])
         try:
-            W, H, box = white_layout(src["width"], src["height"], hook, workdir)
+            W, H, box = white_layout(vid_w, vid_h, hook, workdir)
         except Exception as e:
             print(f"  (Couldn't draw the text: {e}; saving without it.)")
-            W, H, box = white_layout(src["width"], src["height"], "", workdir)
+            W, H, box = white_layout(vid_w, vid_h, "", workdir)
     elif hook.strip():
         hook_lines, font_size = wrap_hook(hook, REEL_W if reel else src["width"])
         for i, line in enumerate(hook_lines):
@@ -733,7 +774,7 @@ def render(source: Path, offset: float, duration: float, out_path: Path, workdir
         c.append(str(out_path.resolve()))
         return c
 
-    graph = (build_white_filter(src, W, H, box) if white
+    graph = (build_white_filter(src, W, H, box, crop) if white
              else build_filter(src, reel, hook_lines, font_size, font_name))
     run = subprocess.run(cmd(graph),
                          cwd=workdir, capture_output=True, text=True, encoding="utf-8", errors="replace")
