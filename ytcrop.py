@@ -580,6 +580,113 @@ def detect_bars(source: Path, offset: float, duration: float, workdir: Path,
     return w, h, x, y
 
 
+SQUARE_MIN_KEEP = 0.56          # never cut away more than 44% of the width
+FACE_MODEL = Path(__file__).resolve().parent / "models" / "face_detection_yunet_2023mar.onnx"
+
+
+def _cleanup(frames: list[Path]) -> None:
+    for f in frames:
+        f.unlink(missing_ok=True)
+
+
+def find_faces(frames: list[Path]) -> list[tuple[float, float]]:
+    """Horizontal extent (left, right) of each face found in the frames (YuNet, OpenCV)."""
+    try:
+        import cv2
+    except ImportError:
+        return []
+    if not FACE_MODEL.is_file():
+        return []
+    out = []
+    det = None
+    for f in frames:
+        img = cv2.imread(str(f))
+        if img is None:
+            continue
+        fh, fw = img.shape[:2]
+        if det is None:
+            det = cv2.FaceDetectorYN.create(str(FACE_MODEL), "", (fw, fh), 0.7)
+        det.setInputSize((fw, fh))
+        _, found = det.detect(img)
+        for face in (found if found is not None else []):
+            fx, fy, fwid, fhei = face[:4]
+            if fwid >= fw * 0.04:                    # ignore tiny background faces
+                out.append((float(fx), float(fx + fwid)))
+    return out
+
+
+def smart_zoom(source: Path, offset: float, duration: float, workdir: Path,
+               box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """Zoom a wide video towards a square, keeping the busiest part (movement + detail).
+    box = current crop (w, h, x, y); returns the new crop."""
+    w, h, x, y = box
+    if w <= h:
+        return box
+    keep = max(h, round(w * SQUARE_MIN_KEEP)) // 2 * 2
+    if keep >= w - 4:
+        return box
+    from PIL import Image, ImageChops, ImageFilter
+    n = 12
+    det_w, small_w = 480, 160
+    run = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{offset:.3f}", "-t", f"{duration:.3f}",
+         "-i", source.name, "-vf", f"crop={w}:{h}:{x}:{y},fps={n / max(duration, 0.5):.4f},"
+         f"scale={det_w}:-2", "-frames:v", str(n), "zoom_%02d.png"],
+        cwd=workdir, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    frames = sorted(workdir.glob("zoom_*.png"))
+    if run.returncode != 0 or not frames:
+        return (keep, h, x + (w - keep) // 2 // 2 * 2, y)        # fall back to centre
+
+    def window(lo: float, hi: float, width: float, full: float) -> float:
+        """Left edge of a window `width` wide, centred on lo..hi, inside 0..full."""
+        return min(max(0.0, (lo + hi) / 2 - width / 2), full - width)
+
+    # 1) Faces: every face seen in the clip must stay in the picture.
+    faces = find_faces(frames)
+    if faces:
+        lo, hi = min(f[0] for f in faces), max(f[1] for f in faces)
+        pad = (hi - lo) * 0.12 + det_w * 0.04
+        need = (hi - lo) + 2 * pad
+        keep_det = max(keep * det_w / w, need)
+        if keep_det >= det_w * 0.97:
+            _cleanup(frames)
+            return box                                  # faces spread across the frame: no zoom
+        keep = round(keep_det * w / det_w) // 2 * 2
+        left = window(lo, hi, keep_det, det_w)
+        _cleanup(frames)
+        new_x = min(max(0, round(left * w / det_w)), w - keep) // 2 * 2
+        return (keep, h, x + new_x, y)
+
+    # 2) No faces: follow movement and detail.
+    energy = [0.0] * small_w
+    prev = None
+    for f in frames:
+        img = Image.open(f).convert("L").resize((small_w, max(2, round(small_w * h / w))))
+        edges = img.filter(ImageFilter.FIND_EDGES)
+        layers = [(edges, 1.0)]
+        if prev is not None:
+            layers.append((ImageChops.difference(img, prev), 2.5))   # movement counts more
+        for layer, weight in layers:
+            cols = layer.resize((small_w, 1), Image.BOX).getdata()
+            for i, v in enumerate(cols):
+                energy[i] += v * weight
+        prev = img
+        f.unlink(missing_ok=True)
+    # mild preference for the middle, where the subject usually is
+    mid = (small_w - 1) / 2
+    energy = [e * (0.75 + 0.25 * (1 - abs(i - mid) / mid)) for i, e in enumerate(energy)]
+    win = max(1, round(small_w * keep / w))
+    best, best_i, cur = -1.0, 0, sum(energy[:win])
+    for i in range(0, small_w - win + 1):
+        if i:
+            cur += energy[i + win - 1] - energy[i - 1]
+        if cur > best:
+            best, best_i = cur, i
+    new_x = round(best_i * w / small_w)
+    new_x = min(max(0, new_x), w - keep) // 2 * 2
+    return (keep, h, x + new_x, y)
+
+
 def _emoji_start(cp: int, nxt: int) -> bool:
     if 0x1F000 <= cp <= 0x1FAFF:
         return True
@@ -740,7 +847,12 @@ def render(source: Path, offset: float, duration: float, out_path: Path, workdir
     if white:
         reel = False
         crop = detect_bars(source, offset, duration, workdir, src["width"], src["height"])
-        vid_w, vid_h = (crop[0], crop[1]) if crop else (src["width"], src["height"])
+        crop = crop or (src["width"] // 2 * 2, src["height"] // 2 * 2, 0, 0)
+        try:
+            crop = smart_zoom(source, offset, duration, workdir, crop)
+        except Exception as e:
+            print(f"  (Couldn't zoom: {e}; keeping the full width.)")
+        vid_w, vid_h = crop[0], crop[1]
         try:
             W, H, box = white_layout(vid_w, vid_h, hook, workdir)
         except Exception as e:
