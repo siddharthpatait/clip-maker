@@ -771,7 +771,11 @@ def white_layout(src_w: int, src_h: int, hook: str, workdir: Path) -> tuple[int,
             items = []
             for is_e, piece in split_emoji(word):
                 img = emoji_image(piece) if is_e else None
-                items.append((True, piece, img) if img is not None else (False, piece, None))
+                item = (True, piece, img) if img is not None else (False, piece, None)
+                # "rent😂" typed without a space: still leave a space between word and emoji
+                if items and items[-1][0] != item[0]:
+                    items.append((False, " ", None))
+                items.append(item)
             return items
 
         def width(items) -> float:
