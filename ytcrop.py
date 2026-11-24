@@ -22,6 +22,7 @@ import tempfile
 import textwrap
 import threading
 import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -519,11 +520,192 @@ def build_filter(src: dict, reel: bool, hook_lines: list[str], font_size: int,
     return ",".join(chains) + "[v]"
 
 
+# --------------------------------------------------------------------------- #
+# "White" layout: 9:16 white page, caption above the video (meme style)
+# --------------------------------------------------------------------------- #
+EMOJI_URL = "https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/{}.png"
+EMOJI_DIR = Path(tempfile.gettempdir()) / "ytcrop_emoji"
+
+
+def find_regular_font() -> Path | None:
+    windir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+    candidates = [
+        windir / "arial.ttf", windir / "segoeui.ttf",
+        Path("/System/Library/Fonts/Helvetica.ttc"),
+        Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+        Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+        Path("/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    ]
+    return next((p for p in candidates if p.is_file()), None)
+
+
+def _emoji_start(cp: int, nxt: int) -> bool:
+    if 0x1F000 <= cp <= 0x1FAFF:
+        return True
+    if 0x2300 <= cp <= 0x23FF or 0x2600 <= cp <= 0x27BF or 0x2B00 <= cp <= 0x2BFF:
+        return True
+    # text symbols (© ® ™ ↔ 1 # ...) only when the emoji form is asked for
+    return nxt in (0xFE0F, 0x20E3)
+
+
+def split_emoji(text: str) -> list[tuple[bool, str]]:
+    """Split text into (is_emoji, piece) runs, keeping ZWJ/skin-tone/flag sequences whole."""
+    out: list[tuple[bool, str]] = []
+    i, n = 0, len(text)
+    while i < n:
+        cp = ord(text[i])
+        nxt = ord(text[i + 1]) if i + 1 < n else 0
+        if not _emoji_start(cp, nxt):
+            if out and not out[-1][0]:
+                out[-1] = (False, out[-1][1] + text[i])
+            else:
+                out.append((False, text[i]))
+            i += 1
+            continue
+        j = i + 1
+        if 0x1F1E6 <= cp <= 0x1F1FF and 0x1F1E6 <= nxt <= 0x1F1FF:
+            j += 1                                    # flag = two regional letters
+        while j < n:
+            c = ord(text[j])
+            if c in (0xFE0F, 0xFE0E, 0x20E3) or 0x1F3FB <= c <= 0x1F3FF or 0xE0020 <= c <= 0xE007F:
+                j += 1
+            elif c == 0x200D and j + 1 < n:
+                j += 2                                # joined emoji (family, profession, ...)
+            else:
+                break
+        out.append((True, text[i:j]))
+        i = j
+    return out
+
+
+def emoji_image(seq: str):
+    """The iPhone-style picture for one emoji (cached), or None."""
+    from PIL import Image
+    cps = [f"{ord(c):x}" for c in seq]
+    plain = [c for c in cps if c != "fe0f"]
+    names = ["-".join(cps), "-".join(plain), "-".join(plain[:1] + ["fe0f"] + plain[1:])]
+    EMOJI_DIR.mkdir(exist_ok=True)
+    for name in dict.fromkeys(names):
+        path = EMOJI_DIR / f"{name}.png"
+        if not path.is_file():
+            try:
+                with urllib.request.urlopen(EMOJI_URL.format(name), timeout=10) as r:
+                    data = r.read()
+            except Exception:
+                continue
+            path.write_bytes(data)
+        try:
+            return Image.open(path).convert("RGBA")
+        except Exception:
+            path.unlink(missing_ok=True)
+    return None
+
+
+def white_layout(src_w: int, src_h: int, hook: str, workdir: Path) -> tuple[int, int, dict]:
+    """Plan the white 9:16 page and draw the caption to caption.png.
+    Returns (canvas_w, canvas_h, video box {w,h,x,y})."""
+    W = 1080 if MAX_HEIGHT >= 1080 else 720
+    H = W * 16 // 9
+    margin = round(W * 0.074)
+    size = round(W * 0.053)
+    line_h = round(size * 1.38)
+    gap = round(W * 0.035)
+    top_min = round(H * 0.11)                         # keep clear of Instagram's top bar
+
+    lines: list[list[tuple[bool, str, object]]] = []
+    font = None
+    if hook.strip():
+        from PIL import ImageFont
+        fpath = find_regular_font()
+        font = ImageFont.truetype(str(fpath), size) if fpath else ImageFont.load_default(size)
+        e_size = round(size * 0.95)
+        e_adv = e_size + round(size * 0.1)
+
+        def word_items(word: str):
+            items = []
+            for is_e, piece in split_emoji(word):
+                img = emoji_image(piece) if is_e else None
+                items.append((True, piece, img) if img is not None else (False, piece, None))
+            return items
+
+        def width(items) -> float:
+            return sum(e_adv if is_e else font.getlength(t) for is_e, t, _ in items)
+
+        max_w = W - 2 * margin
+        space = font.getlength(" ")
+        cur, cur_w = [], 0.0
+        for word in hook.split():
+            w_items = word_items(word)
+            w = width(w_items)
+            if cur and cur_w + space + w > max_w:
+                lines.append(cur)
+                cur, cur_w = [], 0.0
+            if cur:
+                cur.append((False, " ", None))
+                cur_w += space
+            cur += w_items
+            cur_w += w
+        if cur:
+            lines.append(cur)
+
+    text_h = len(lines) * line_h
+    # video: full width, centred; moved down / shrunk if the caption needs room
+    vw, vh = W, round(W * src_h / src_w)
+    need_top = top_min + text_h + gap if lines else 0
+    bottom_room = round(H * 0.06)
+    if vh > H - need_top - (bottom_room if lines else 0):
+        vh = H - need_top - (bottom_room if lines else 0)
+        vw = round(vh * src_w / src_h)
+    vw, vh = vw // 2 * 2, vh // 2 * 2
+    vy = max((H - vh) // 2, need_top) // 2 * 2
+    vx = (W - vw) // 2 // 2 * 2
+
+    if lines:
+        from PIL import Image, ImageDraw
+        canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(canvas)
+        ascent = font.getmetrics()[0]
+        top = vy - gap - text_h
+        for i, line in enumerate(lines):
+            x = float(margin)
+            base = top + i * line_h + round((line_h - size) / 2) + ascent
+            for is_e, piece, img in line:
+                if is_e:
+                    em = img.resize((e_size, e_size), Image.LANCZOS)
+                    canvas.alpha_composite(em, (round(x), round(base - e_size * 0.86)))
+                    x += e_adv
+                else:
+                    draw.text((x, base), piece, font=font, fill=(0, 0, 0, 255), anchor="ls")
+                    x += font.getlength(piece)
+        canvas.save(workdir / "caption.png")
+    return W, H, {"w": vw, "h": vh, "x": vx, "y": vy, "caption": bool(lines)}
+
+
+def build_white_filter(src: dict, W: int, H: int, box: dict) -> str:
+    chain = (f"[0:v]scale={box['w']}:{box['h']},setsar=1,"
+             f"pad={W}:{H}:{box['x']}:{box['y']}:color=white")
+    if src["fps"] > 30.5:
+        chain += ",fps=30"
+    if box["caption"]:
+        chain += "[base];[base][1:v]overlay=0:0"
+    return chain + ",format=yuv420p[v]"
+
+
 def render(source: Path, offset: float, duration: float, out_path: Path, workdir: Path,
-           reel: bool, hook: str) -> None:
+           reel, hook: str) -> None:
+    """reel: True = blurred 9:16 Reel, False = original shape, "white" = white 9:16 page."""
     src = probe(source)
     hook_lines, font_size, font_name = [], 0, None
-    if hook.strip():
+    white = reel == "white"
+    if white:
+        reel = False
+        try:
+            W, H, box = white_layout(src["width"], src["height"], hook, workdir)
+        except Exception as e:
+            print(f"  (Couldn't draw the text: {e}; saving without it.)")
+            W, H, box = white_layout(src["width"], src["height"], "", workdir)
+    elif hook.strip():
         hook_lines, font_size = wrap_hook(hook, REEL_W if reel else src["width"])
         for i, line in enumerate(hook_lines):
             (workdir / f"hook{i}.txt").write_text(line, encoding="utf-8")
@@ -537,8 +719,10 @@ def render(source: Path, offset: float, duration: float, out_path: Path, workdir
 
     def cmd(filter_graph: str) -> list[str]:
         c = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-             "-ss", f"{offset:.3f}", "-t", f"{duration:.3f}", "-i", source.name,
-             "-filter_complex", filter_graph, "-map", "[v]"]
+             "-ss", f"{offset:.3f}", "-t", f"{duration:.3f}", "-i", source.name]
+        if white and box["caption"]:
+            c += ["-i", "caption.png"]
+        c += ["-filter_complex", filter_graph, "-map", "[v]"]
         if src["has_audio"]:
             c += ["-map", "0:a:0", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
         c += ["-c:v", "libx264", "-preset", X264_PRESET, "-crf", "18", "-pix_fmt", "yuv420p",
@@ -549,7 +733,9 @@ def render(source: Path, offset: float, duration: float, out_path: Path, workdir
         c.append(str(out_path.resolve()))
         return c
 
-    run = subprocess.run(cmd(build_filter(src, reel, hook_lines, font_size, font_name)),
+    graph = (build_white_filter(src, W, H, box) if white
+             else build_filter(src, reel, hook_lines, font_size, font_name))
+    run = subprocess.run(cmd(graph),
                          cwd=workdir, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if run.returncode != 0 and hook_lines:
         print("  (Couldn't draw the hook text with this ffmpeg build; saving without it.)")
@@ -650,10 +836,10 @@ def interactive() -> None:
         for n in notes:
             print(f"  {n}")
 
-        fmt = ask("Format? [1] Original  [2] Reel 9:16 (default: 2): ")
-        while fmt not in ("", "1", "2"):
-            fmt = ask("  Please type 1 or 2 (Enter = 2): ")
-        reel = fmt != "1"
+        fmt = ask("Format? [1] Original  [2] Reel 9:16  [3] White page 9:16 (default: 2): ")
+        while fmt not in ("", "1", "2", "3"):
+            fmt = ask("  Please type 1, 2 or 3 (Enter = 2): ")
+        reel = "white" if fmt == "3" else fmt != "1"
         hook = ask("Hook text on top? (Enter to skip): ")
 
         try:

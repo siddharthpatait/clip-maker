@@ -281,7 +281,8 @@ def api_clip():
         return jsonify(ok=False, error=str(e))
     job_id = uuid.uuid4().hex
     with jobs_lock:
-        jobs[job_id] = dict(id=job_id, link=link, cut=cut, hook=hook, reel=data.get("format") == "reel",
+        jobs[job_id] = dict(id=job_id, link=link, cut=cut, hook=hook,
+                            reel={"reel": True, "white": "white"}.get(data.get("format"), False),
                             state="queued", status="Waiting...", created=time.time(), notes=[])
     job_queue.put(job_id)
     return jsonify(ok=True, job=job_id)

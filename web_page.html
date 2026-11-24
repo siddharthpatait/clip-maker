@@ -322,7 +322,7 @@ async function start(r) {
   setStatus(r, "wait", "Queued", 5);
   let d;
   try {
-    d = await post("/api/clip", {link, cut:r.querySelector(".cut").value, hook:r.querySelector(".hook").value, format:"original"});
+    d = await post("/api/clip", {link, cut:r.querySelector(".cut").value, hook:r.querySelector(".hook").value, format:"white"});
   } catch { d = {ok:false, error:"Can't reach Clip Maker. Is it still running?"}; }
   if (!d.ok) { fail(r, d.error); return; }
   r.dataset.job = d.job;

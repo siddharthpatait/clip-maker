@@ -1,3 +1,4 @@
 yt-dlp[default]>=2025.11.12
 flask>=3.0
 waitress>=3.0
+pillow>=10.0

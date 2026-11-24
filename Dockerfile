@@ -3,7 +3,7 @@ FROM python:3.12-slim
 
 # ffmpeg for cutting, a bold font for hook text
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core ca-certificates \
+ && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core fonts-liberation ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 1000 user
