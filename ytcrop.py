@@ -563,128 +563,199 @@ def caption_font(size: int):
     return ImageFont.truetype(str(fpath), size) if fpath else ImageFont.load_default(size)
 
 
-def detect_bars(source: Path, offset: float, duration: float, workdir: Path,
-                width: int, height: int) -> tuple[int, int, int, int] | None:
-    """Find black bars baked into the video. Returns crop (w, h, x, y) or None."""
-    run = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-ss", f"{offset:.3f}", "-t", f"{min(duration, 30):.3f}",
-         "-i", source.name, "-vf", "fps=2,cropdetect=limit=24:round=2:reset=0", "-an", "-f", "null", "-"],
-        cwd=workdir, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    found = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", run.stderr)
-    if not found:
-        return None
-    w, h, x, y = map(int, found[-1])
-    # ignore tiny trims and nonsense (e.g. an all-black clip)
-    if w < width * 0.4 or h < height * 0.4 or (width - w) + (height - h) < max(width, height) * 0.02:
-        return None
-    return w, h, x, y
-
-
 SQUARE_MIN_KEEP = 0.56          # never cut away more than 44% of the width
 FACE_MODEL = Path(__file__).resolve().parent / "models" / "face_detection_yunet_2023mar.onnx"
 
 
-def _cleanup(frames: list[Path]) -> None:
-    for f in frames:
-        f.unlink(missing_ok=True)
+def _bar_size(dark_frac, limit: float) -> int:
+    """How many rows (or columns) from the start are black bars.
+    dark_frac: (frames, lines) share of dark pixels per line. A logo inside a bar is fine:
+    a line counts as bar when it's >= 85% dark in >= 80% of the frames."""
+    is_bar = (dark_frac >= 0.85).mean(axis=0) >= 0.8
+    n = 0
+    while n < len(is_bar) and is_bar[n]:
+        n += 1
+    return n if n <= len(is_bar) * limit else 0
 
 
-def find_faces(frames: list[Path]) -> list[tuple[float, float]]:
-    """Horizontal extent (left, right) of each face found in the frames (YuNet, OpenCV)."""
+def plan_frame(source: Path, offset: float, duration: float, workdir: Path,
+               full_w: int, full_h: int) -> dict:
+    """Decide what part of the picture to show on the white page:
+    cut off black bars, then zoom a wide video towards a square, scene by scene,
+    keeping every face of each scene in the picture.
+    Returns {w, h, y, segs: [(start, end, x_start, x_end), ...]} in full-size pixels."""
+    whole = {"w": full_w // 2 * 2, "h": full_h // 2 * 2, "y": 0, "segs": [(0.0, 0.0, 0, 0)]}
     try:
         import cv2
+        import numpy as np
     except ImportError:
-        return []
-    if not FACE_MODEL.is_file():
-        return []
-    out = []
-    det = None
-    for f in frames:
-        img = cv2.imread(str(f))
-        if img is None:
-            continue
-        fh, fw = img.shape[:2]
-        if det is None:
-            det = cv2.FaceDetectorYN.create(str(FACE_MODEL), "", (fw, fh), 0.7)
-        det.setInputSize((fw, fh))
-        _, found = det.detect(img)
-        for face in (found if found is not None else []):
-            fx, fy, fwid, fhei = face[:4]
-            if fwid >= fw * 0.04:                    # ignore tiny background faces
-                out.append((float(fx), float(fx + fwid)))
-    return out
-
-
-def smart_zoom(source: Path, offset: float, duration: float, workdir: Path,
-               box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
-    """Zoom a wide video towards a square, keeping the busiest part (movement + detail).
-    box = current crop (w, h, x, y); returns the new crop."""
-    w, h, x, y = box
-    if w <= h:
-        return box
-    keep = max(h, round(w * SQUARE_MIN_KEEP)) // 2 * 2
-    if keep >= w - 4:
-        return box
-    from PIL import Image, ImageChops, ImageFilter
-    n = 12
-    det_w, small_w = 480, 160
-    run = subprocess.run(
+        return whole
+    n = int(min(60, max(8, duration * 4)))
+    fps = n / max(duration, 0.5)
+    det_w = 480
+    subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{offset:.3f}", "-t", f"{duration:.3f}",
-         "-i", source.name, "-vf", f"crop={w}:{h}:{x}:{y},fps={n / max(duration, 0.5):.4f},"
-         f"scale={det_w}:-2", "-frames:v", str(n), "zoom_%02d.png"],
+         "-i", source.name, "-vf", f"fps={fps:.4f},scale={det_w}:-2", "-frames:v", str(n), "plan_%03d.png"],
         cwd=workdir, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    frames = sorted(workdir.glob("zoom_*.png"))
-    if run.returncode != 0 or not frames:
-        return (keep, h, x + (w - keep) // 2 // 2 * 2, y)        # fall back to centre
+    paths = sorted(workdir.glob("plan_*.png"))
+    frames = [f for f in (cv2.imread(str(p)) for p in paths) if f is not None]
+    for p in paths:
+        p.unlink(missing_ok=True)
+    if not frames:
+        return whole
+    det_h = frames[0].shape[0]
+    gray = np.stack([cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames])
+    dark = gray < 40
 
-    def window(lo: float, hi: float, width: float, full: float) -> float:
-        """Left edge of a window `width` wide, centred on lo..hi, inside 0..full."""
-        return min(max(0.0, (lo + hi) / 2 - width / 2), full - width)
+    # 1) black bars (rows/columns that stay black; a logo inside a bar doesn't matter)
+    rows, cols = dark.mean(axis=2), dark.mean(axis=1)
+    top, bottom = _bar_size(rows, 0.35), _bar_size(rows[:, ::-1], 0.35)
+    left, right = _bar_size(cols, 0.35), _bar_size(cols[:, ::-1], 0.35)
+    # step 1 line further in, so no dark edge line is left over
+    top, bottom, left, right = (v + 1 if v else 0 for v in (top, bottom, left, right))
+    cx0, cx1, cy0, cy1 = left, det_w - right, top, det_h - bottom
+    if cx1 - cx0 < det_w * 0.4 or cy1 - cy0 < det_h * 0.4:
+        cx0, cx1, cy0, cy1 = 0, det_w, 0, det_h          # nearly all black: leave it alone
+    cw, ch = cx1 - cx0, cy1 - cy0
+    sx, sy = full_w / det_w, full_h / det_h
+    box_x, box_y = round(cx0 * sx) // 2 * 2, round(cy0 * sy) // 2 * 2
+    box_w = min(full_w - box_x, round(cw * sx)) // 2 * 2
+    box_h = min(full_h - box_y, round(ch * sy)) // 2 * 2
+    result = {"w": box_w, "h": box_h, "y": box_y, "segs": [(0.0, 0.0, box_x, box_x)]}
+    if cw <= ch:
+        return result                                     # already square or tall
 
-    # 1) Faces: every face seen in the clip must stay in the picture.
-    faces = find_faces(frames)
-    if faces:
-        lo, hi = min(f[0] for f in faces), max(f[1] for f in faces)
-        pad = (hi - lo) * 0.12 + det_w * 0.04
-        need = (hi - lo) + 2 * pad
-        keep_det = max(keep * det_w / w, need)
-        if keep_det >= det_w * 0.97:
-            _cleanup(frames)
-            return box                                  # faces spread across the frame: no zoom
-        keep = round(keep_det * w / det_w) // 2 * 2
-        left = window(lo, hi, keep_det, det_w)
-        _cleanup(frames)
-        new_x = min(max(0, round(left * w / det_w)), w - keep) // 2 * 2
-        return (keep, h, x + new_x, y)
+    # 2) scenes: a real cut changes the colours a lot (a camera pan doesn't)
+    crops = [f[cy0:cy1, cx0:cx1] for f in frames]
+    hists = []
+    for img in crops:
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1], None, [16, 8], [0, 180, 0, 256])
+        hists.append(cv2.normalize(hist, hist).flatten())
+    cut_after = {i - 1 for i in range(1, len(crops))
+                 if cv2.compareHist(hists[i - 1], hists[i], cv2.HISTCMP_CORREL) < 0.6}
 
-    # 2) No faces: follow movement and detail.
-    energy = [0.0] * small_w
-    prev = None
-    for f in frames:
-        img = Image.open(f).convert("L").resize((small_w, max(2, round(small_w * h / w))))
-        edges = img.filter(ImageFilter.FIND_EDGES)
-        layers = [(edges, 1.0)]
-        if prev is not None:
-            layers.append((ImageChops.difference(img, prev), 2.5))   # movement counts more
-        for layer, weight in layers:
-            cols = layer.resize((small_w, 1), Image.BOX).getdata()
-            for i, v in enumerate(cols):
-                energy[i] += v * weight
-        prev = img
-        f.unlink(missing_ok=True)
-    # mild preference for the middle, where the subject usually is
-    mid = (small_w - 1) / 2
-    energy = [e * (0.75 + 0.25 * (1 - abs(i - mid) / mid)) for i, e in enumerate(energy)]
-    win = max(1, round(small_w * keep / w))
-    best, best_i, cur = -1.0, 0, sum(energy[:win])
-    for i in range(0, small_w - win + 1):
-        if i:
-            cur += energy[i + win - 1] - energy[i - 1]
-        if cur > best:
-            best, best_i = cur, i
-    new_x = round(best_i * w / small_w)
-    new_x = min(max(0, new_x), w - keep) // 2 * 2
-    return (keep, h, x + new_x, y)
+    # 3) main faces in each frame (big faces only; small blurry background faces don't count)
+    det = cv2.FaceDetectorYN.create(str(FACE_MODEL), "", (cw, ch), 0.7) if FACE_MODEL.is_file() else None
+    per_frame: list[tuple[float, float] | None] = []
+    for img in crops:
+        spans = []
+        if det is not None:
+            det.setInputSize((img.shape[1], img.shape[0]))
+            _, found = det.detect(img)
+            for face in (found if found is not None else []):
+                fx, _, fwid, _ = face[:4]
+                if fwid >= cw * 0.04:
+                    spans.append((max(0.0, float(fx)), min(float(cw), float(fx + fwid))))
+        if spans:
+            biggest = max(b - a for a, b in spans)
+            spans = [(a, b) for a, b in spans if b - a >= biggest * 0.55]
+            per_frame.append((min(a for a, _ in spans), max(b for _, b in spans)))
+        else:
+            per_frame.append(None)
+    # a face that jumps across the picture between two samples is also a cut
+    for i in range(1, len(per_frame)):
+        a, b = per_frame[i - 1], per_frame[i]
+        if a and b and abs((a[0] + a[1]) / 2 - (b[0] + b[1]) / 2) > cw * 0.25:
+            cut_after.add(i - 1)
+    scene_of, s = [], 0
+    for i in range(len(crops)):
+        scene_of.append(s)
+        if i in cut_after:
+            s += 1
+
+    # 4) one zoom size for the whole clip: square-ish, wide enough for the people in
+    #    (nearly) every frame; a short wide moment doesn't stop the zoom
+    needs = sorted((hi - lo) * 1.3 + cw * 0.08 for lo, hi in (p for p in per_frame if p))
+    keep = max(ch, cw * SQUARE_MIN_KEEP)
+    if needs:
+        keep = max(keep, needs[min(len(needs) - 1, int(len(needs) * 0.9))])
+    if os.environ.get("YTCROP_DEBUG"):
+        print(f"  width {cw} keep {keep:.0f} scenes {scene_of} faces {per_frame}")
+    if keep >= cw * 0.97:
+        return result                                     # people fill the width: no zoom
+
+    # 5) where to look: follow the faces smoothly inside a scene, jump at a cut
+    centres: list[float] = [0.0] * len(crops)
+    for sc in sorted(set(scene_of)):
+        idx = [i for i in range(len(crops)) if scene_of[i] == sc]
+        known = [(i, (per_frame[i][0] + per_frame[i][1]) / 2) for i in idx if per_frame[i]]
+        if known:
+            lo = min(per_frame[i][0] for i in idx if per_frame[i])
+            hi = max(per_frame[i][1] for i in idx if per_frame[i])
+            if hi - lo <= keep * 0.92:                    # everyone fits: hold still for the scene
+                for i in idx:
+                    centres[i] = (lo + hi) / 2
+                continue
+            for i in idx:                                 # frames without a face: nearest face
+                centres[i] = min(known, key=lambda k: abs(k[0] - i))[1]
+            vals = [centres[i] for i in idx]              # smooth out detector jitter
+            for j, i in enumerate(idx):
+                window_vals = sorted(vals[max(0, j - 2): j + 3])
+                centres[i] = window_vals[len(window_vals) // 2]
+            vals = [centres[i] for i in idx]
+            for j, i in enumerate(idx):
+                part = vals[max(0, j - 2): j + 3]
+                centres[i] = sum(part) / len(part)
+            max_step = cw * 0.25 / fps                    # pan at most 1/4 of the width per second
+            for j in range(1, len(idx)):
+                prev, cur = centres[idx[j - 1]], centres[idx[j]]
+                centres[idx[j]] = prev + max(-max_step, min(max_step, cur - prev))
+        else:                                             # no face: follow movement and detail
+            g = gray[idx[0]: idx[-1] + 1, cy0:cy1, cx0:cx1].astype(np.float32)
+            energy = np.abs(np.diff(g, axis=2)).mean(axis=(0, 1))
+            if len(idx) > 1:
+                energy = energy + 2.5 * np.abs(np.diff(g, axis=0)).mean(axis=(0, 1))[1:]
+            mid = (len(energy) - 1) / 2
+            energy = energy * (0.75 + 0.25 * (1 - np.abs(np.arange(len(energy)) - mid) / max(mid, 1)))
+            win = max(1, int(round(keep)))
+            sums = np.convolve(energy, np.ones(win), mode="valid")
+            c = int(np.argmax(sums)) + win / 2 if len(sums) else cw / 2
+            for i in idx:
+                centres[i] = c
+
+    keep_full = min(box_w, round(keep * sx)) // 2 * 2
+
+    def to_x(c: float) -> int:
+        xd = min(max(0.0, c - keep / 2), cw - keep)
+        return box_x + min(box_w - keep_full, round(xd * sx))
+
+    xs = [to_x(c) for c in centres]
+    times = [i / fps for i in range(len(xs))]
+    segs = []                                             # (start, end, x at start, x at end)
+    for i in range(len(xs) - 1):
+        if i in cut_after:
+            mid_t = (times[i] + times[i + 1]) / 2
+            segs += [(times[i], mid_t, xs[i], xs[i]), (mid_t, times[i + 1], xs[i + 1], xs[i + 1])]
+        else:
+            segs.append((times[i], times[i + 1], xs[i], xs[i + 1]))
+    # merge pieces that hardly move, to keep the ffmpeg expression short
+    merged = []
+    for seg in segs:
+        if merged and merged[-1][2] == merged[-1][3] == seg[2] == seg[3]:
+            merged[-1] = (merged[-1][0], seg[1], seg[2], seg[3])
+        elif merged and abs(seg[2] - seg[3]) <= 2 and abs(merged[-1][3] - seg[2]) <= 2 \
+                and abs(merged[-1][2] - merged[-1][3]) <= 2:
+            merged[-1] = (merged[-1][0], seg[1], merged[-1][2], merged[-1][2])
+        else:
+            merged.append(seg)
+    if not merged:
+        merged = [(0.0, 0.0, xs[0], xs[0])]
+    return {"w": keep_full, "h": box_h, "y": box_y, "segs": merged}
+
+
+def crop_filter(plan: dict) -> str:
+    """ffmpeg crop whose x position moves with the plan's segments (time in seconds)."""
+    segs = plan["segs"]
+    expr = str(segs[-1][3])                               # after the last segment: stay put
+    for t0, t1, xa, xb in reversed(segs):
+        if xa == xb or t1 <= t0:
+            val = str(xa)
+        else:
+            val = f"{xa}+({xb - xa})*(t-{t0:.3f})/{t1 - t0:.3f}"
+        expr = f"if(lt(t\\,{t1:.3f})\\,{val}\\,{expr})"
+    return f"crop={plan['w']}:{plan['h']}:'{expr}':{plan['y']}"
+
 
 
 def _emoji_start(cp: int, nxt: int) -> bool:
@@ -831,8 +902,8 @@ def white_layout(src_w: int, src_h: int, hook: str, workdir: Path) -> tuple[int,
     return W, H, {"w": vw, "h": vh, "x": vx, "y": vy, "caption": bool(lines)}
 
 
-def build_white_filter(src: dict, W: int, H: int, box: dict, crop=None) -> str:
-    chain = "[0:v]" + (f"crop={crop[0]}:{crop[1]}:{crop[2]}:{crop[3]}," if crop else "")
+def build_white_filter(src: dict, W: int, H: int, box: dict, plan: dict | None = None) -> str:
+    chain = "[0:v]" + (crop_filter(plan) + "," if plan else "")
     chain += (f"scale={box['w']}:{box['h']},setsar=1,"
              f"pad={W}:{H}:{box['x']}:{box['y']}:color=white")
     if src["fps"] > 30.5:
@@ -850,13 +921,12 @@ def render(source: Path, offset: float, duration: float, out_path: Path, workdir
     white = reel == "white"
     if white:
         reel = False
-        crop = detect_bars(source, offset, duration, workdir, src["width"], src["height"])
-        crop = crop or (src["width"] // 2 * 2, src["height"] // 2 * 2, 0, 0)
         try:
-            crop = smart_zoom(source, offset, duration, workdir, crop)
+            crop = plan_frame(source, offset, duration, workdir, src["width"], src["height"])
         except Exception as e:
-            print(f"  (Couldn't zoom: {e}; keeping the full width.)")
-        vid_w, vid_h = crop[0], crop[1]
+            print(f"  (Couldn't check bars/zoom: {e}; keeping the full picture.)")
+            crop = None
+        vid_w, vid_h = (crop["w"], crop["h"]) if crop else (src["width"], src["height"])
         try:
             W, H, box = white_layout(vid_w, vid_h, hook, workdir)
         except Exception as e:
