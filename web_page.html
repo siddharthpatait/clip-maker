@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clip Maker</title>
+<style>
+  :root {
+    --bg:#f6f7f9; --panel:#ffffff; --text:#14161a; --muted:#6a7080; --faint:#9aa0ad;
+    --line:#e4e7ec; --field:#f3f4f7; --field-line:#dfe2e8;
+    --accent:#4f46e5; --accent-hover:#4338ca; --accent-soft:#eef0ff;
+    --ok:#15803d; --ok-soft:#e8f6ed; --warn:#b45309; --warn-soft:#fdf3e5; --err:#b91c1c; --err-soft:#fdeaea;
+    --shadow:0 1px 2px rgba(16,24,40,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#0f1115; --panel:#171a20; --text:#eef0f4; --muted:#9aa1b1; --faint:#6b7282;
+      --line:#262a33; --field:#1e222a; --field-line:#2d323c;
+      --accent:#7c74ff; --accent-hover:#9089ff; --accent-soft:#25234a;
+      --ok:#4ade80; --ok-soft:#15291d; --warn:#fbbf24; --warn-soft:#2d2412; --err:#f87171; --err-soft:#2e1717;
+      --shadow:none;
+    }
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.4 Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+
+  /* Top bar */
+  .top { position:sticky; top:0; z-index:5; background:color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter:blur(8px); border-bottom:1px solid var(--line); }
+  .top .in { max-width:1180px; margin:0 auto; padding:12px 20px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  .brand { display:flex; align-items:center; gap:10px; font-weight:700; font-size:16px; }
+  .logo { width:28px; height:28px; border-radius:8px; background:var(--accent); display:grid; place-items:center; }
+  .logo svg { width:15px; height:15px; fill:#fff; }
+  .counts { display:flex; gap:6px; flex-wrap:wrap; }
+  .chip { font-size:12px; padding:3px 9px; border-radius:999px; background:var(--field); color:var(--muted); font-weight:500; }
+  .chip.ok { background:var(--ok-soft); color:var(--ok); }
+  .chip.run { background:var(--accent-soft); color:var(--accent); }
+  .chip.err { background:var(--err-soft); color:var(--err); }
+  .actions { margin-left:auto; display:flex; gap:8px; }
+  .btn { display:inline-flex; align-items:center; gap:7px; height:36px; padding:0 14px; border-radius:9px; border:1px solid transparent;
+    font:600 14px/1 inherit; cursor:pointer; text-decoration:none; white-space:nowrap; }
+  .btn svg { width:16px; height:16px; }
+  .btn.primary { background:var(--accent); color:#fff; }
+  .btn.primary:hover { background:var(--accent-hover); }
+  .btn.ghost { background:var(--panel); color:var(--text); border-color:var(--line); box-shadow:var(--shadow); }
+  .btn.ghost:hover { border-color:var(--faint); }
+  .btn[disabled], .btn.disabled { opacity:.45; pointer-events:none; }
+
+  main { max-width:1180px; margin:0 auto; padding:16px 20px 40px; }
+  .hint { color:var(--muted); font-size:13px; margin:0 0 12px; display:flex; gap:8px; align-items:center; }
+  .hint kbd { font:600 11px/1 inherit; background:var(--panel); border:1px solid var(--line); border-radius:5px; padding:3px 6px; }
+
+  /* List */
+  .list { background:var(--panel); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); overflow:hidden; }
+  .cols, .row { display:grid; grid-template-columns:24px 96px minmax(0,1.5fr) 150px minmax(0,1fr) 190px 28px;
+    gap:12px; align-items:center; padding:10px 14px; }
+  .cols { font-size:11px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--faint);
+    border-bottom:1px solid var(--line); padding-top:9px; padding-bottom:9px; }
+  .row { border-bottom:1px solid var(--line); position:relative; }
+  .row:last-child { border-bottom:0; }
+  .row.empty .thumb { opacity:.5; }
+  .n { color:var(--faint); font-variant-numeric:tabular-nums; font-size:12px; text-align:right; }
+  .thumb { width:96px; aspect-ratio:16/9; border-radius:6px; background:var(--field) center/cover no-repeat;
+    border:1px solid var(--line); position:relative; display:grid; place-items:center; color:var(--faint); overflow:hidden; }
+  .thumb svg { width:18px; height:18px; fill:currentColor; }
+  .thumb.has svg { display:none; }
+  .thumb .play { position:absolute; inset:0; display:none; place-items:center; background:rgba(0,0,0,.35); border:0; cursor:pointer; color:#fff; }
+  .row.done .thumb .play { display:grid; }
+  .thumb .play svg { display:block; width:22px; height:22px; fill:#fff; }
+  .main { min-width:0; }
+  .title { font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:4px; min-height:18px; }
+  .title .dur { color:var(--muted); font-weight:500; }
+  .title.muted { color:var(--faint); font-weight:500; }
+  .title.err { color:var(--err); font-weight:500; white-space:normal; }
+  input[type=text] { width:100%; height:32px; padding:0 10px; font:13px inherit; color:var(--text);
+    background:var(--field); border:1px solid var(--field-line); border-radius:7px; }
+  input[type=text]::placeholder { color:var(--faint); }
+  input[type=text]:focus { outline:none; border-color:var(--accent); background:var(--panel); box-shadow:0 0 0 3px var(--accent-soft); }
+  .cut { font-variant-numeric:tabular-nums; }
+  .x { width:28px; height:28px; border:0; background:none; color:var(--faint); border-radius:6px; cursor:pointer; display:grid; place-items:center; }
+  .x:hover { background:var(--field); color:var(--text); }
+  .x svg { width:14px; height:14px; }
+  .row.empty .x { visibility:hidden; }
+
+  /* Status */
+  .status { min-width:0; }
+  .pill { display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:4px 9px; border-radius:999px;
+    background:var(--field); color:var(--muted); max-width:100%; }
+  .pill .dot { width:7px; height:7px; border-radius:50%; background:currentColor; flex:none; }
+  .pill.run { background:var(--accent-soft); color:var(--accent); }
+  .pill.run .dot { animation:pulse 1s ease-in-out infinite; }
+  .pill.wait { background:var(--warn-soft); color:var(--warn); }
+  .pill.ok { background:var(--ok-soft); color:var(--ok); }
+  .pill.err { background:var(--err-soft); color:var(--err); }
+  @keyframes pulse { 50% { opacity:.3; } }
+  .bar { height:3px; border-radius:2px; background:var(--field); margin-top:7px; overflow:hidden; }
+  .bar i { display:block; height:100%; width:0; background:var(--accent); border-radius:2px; transition:width .5s ease; }
+  .done-line { display:flex; align-items:center; gap:8px; }
+  .icon-btn { width:30px; height:30px; display:grid; place-items:center; border-radius:7px; border:1px solid var(--line);
+    background:var(--panel); color:var(--text); cursor:pointer; text-decoration:none; flex:none; }
+  .icon-btn:hover { border-color:var(--faint); }
+  .icon-btn svg { width:15px; height:15px; }
+
+  .add { display:flex; align-items:center; gap:8px; width:100%; padding:12px 14px; border:0; border-top:1px solid var(--line);
+    background:none; color:var(--accent); font:600 13px inherit; cursor:pointer; }
+  .add:hover { background:var(--field); }
+  .add svg { width:14px; height:14px; }
+
+  /* Preview */
+  dialog { border:0; padding:0; border-radius:12px; background:#000; max-width:min(960px, 94vw); width:100%; }
+  dialog::backdrop { background:rgba(10,12,16,.7); }
+  dialog video { display:block; width:100%; max-height:80vh; background:#000; }
+  dialog .bar2 { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 12px; background:var(--panel); color:var(--text); }
+  dialog .bar2 span { font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  /* Phone */
+  @media (max-width: 760px) {
+    .top .in { padding:10px 14px; gap:10px; }
+    .actions { margin-left:0; width:100%; }
+    .actions .btn { flex:1; justify-content:center; }
+    main { padding:12px 12px 32px; }
+    .hint { display:none; }
+    .cols { display:none; }
+    .row { grid-template-columns:72px 62px minmax(0,1fr) 28px; grid-template-areas:
+      "thumb main main x" "cut cut hook hook" "status status status status"; gap:8px; padding:10px 12px; }
+    .row input[type=text] { height:30px; }
+    .title { margin-bottom:3px; }
+    .row:not(.empty) .status:empty { display:none; }
+    .n { display:none; }
+    .thumb { grid-area:thumb; width:72px; }
+    .main { grid-area:main; } .x { grid-area:x; align-self:start; }
+    .cut { grid-area:cut; } .hook { grid-area:hook; } .status { grid-area:status; }
+    .row.empty .cut, .row.empty .hook, .row.empty .status { display:none; }
+    .row.empty { grid-template-areas:"thumb main main x"; }
+    .done-line .icon-btn { width:28px; height:28px; }
+    .status .bar { margin-top:5px; }
+  }
+</style>
+</head>
+<body>
+<header class="top"><div class="in">
+  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>Clip Maker</div>
+  <div class="counts" id="counts"></div>
+  <div class="actions">
+    <button class="btn primary" id="go" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.1 15.9M14.5 14.5 20 20M8.1 8.1 12 12"/></svg>
+      <span>Make clips</span></button>
+    <a class="btn ghost disabled" id="zip" href="#">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      <span>Download all</span></a>
+  </div>
+</div></header>
+
+<main>
+  <p class="hint">Paste a YouTube link in each row, or paste several rows from a spreadsheet (link, part, text) into any link box. <kbd>Empty part</kbd> = whole video.</p>
+  <div class="list">
+    <div class="cols"><span></span><span></span><span>Video</span><span>Part</span><span>Text on top</span><span>Status</span><span></span></div>
+    <div id="rows"></div>
+    <button class="add" id="add" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Add video</button>
+  </div>
+</main>
+
+<dialog id="dlg">
+  <video id="dlgVideo" controls playsinline></video>
+  <div class="bar2"><span id="dlgName"></span>
+    <div style="display:flex;gap:8px"><a class="btn primary" id="dlgDl" href="#">Download</a>
+    <button class="btn ghost" type="button" onclick="closePreview()">Close</button></div></div>
+</dialog>
+
+<template id="tpl">
+  <div class="row empty">
+    <span class="n"></span>
+    <div class="thumb"><svg viewBox="0 0 24 24"><path d="M21.6 7.2a2.5 2.5 0 0 0-1.8-1.8C18.3 5 12 5 12 5s-6.3 0-7.8.4A2.5 2.5 0 0 0 2.4 7.2 26 26 0 0 0 2 12a26 26 0 0 0 .4 4.8 2.5 2.5 0 0 0 1.8 1.8C5.7 19 12 19 12 19s6.3 0 7.8-.4a2.5 2.5 0 0 0 1.8-1.8A26 26 0 0 0 22 12a26 26 0 0 0-.4-4.8zM10 15V9l5.2 3z"/></svg>
+      <button class="play" type="button" title="Preview"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button></div>
+    <div class="main"><div class="title muted">Paste a YouTube link</div>
+      <input type="text" class="link" placeholder="https://www.youtube.com/watch?v=..." spellcheck="false"></div>
+    <input type="text" class="cut" placeholder="0:52-1:12" spellcheck="false">
+    <input type="text" class="hook" maxlength="150" placeholder="Optional">
+    <div class="status"></div>
+    <button class="x" type="button" title="Remove"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+</template>
+
+<script>
+const MAX = 20;
+const $ = id => document.getElementById(id);
+const rowsEl = $("rows");
+const rows = () => [...rowsEl.querySelectorAll(".row")];
+const esc = s => { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; };
+const post = (url, body) => fetch(url, {method:"POST", headers:{"Content-Type":"application/json"},
+                                         body:JSON.stringify(body)}).then(r => r.json());
+const ICON_DL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>';
+const ICON_PLAY = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+
+function videoId(link) {
+  const m = link.match(/(?:v=|youtu\.be\/|shorts\/|embed\/|live\/)([A-Za-z0-9_-]{11})/) || link.match(/^([A-Za-z0-9_-]{11})$/);
+  return m ? m[1] : null;
+}
+
+function addRow(data = {}) {
+  if (rows().length >= MAX) return null;
+  const r = $("tpl").content.firstElementChild.cloneNode(true);
+  const link = r.querySelector(".link");
+  link.value = data.link || "";
+  r.querySelector(".cut").value = data.cut || "";
+  r.querySelector(".hook").value = data.hook || "";
+  r.querySelector(".x").onclick = () => { r.remove(); if (!rows().length) addRow(); renumber(); update(); };
+  r.querySelector(".play").onclick = () => openPreview(r);
+  let timer;
+  link.addEventListener("input", () => { clearTimeout(timer); onLinkChange(r); timer = setTimeout(() => loadInfo(r), 500); ensureEmpty(); });
+  link.addEventListener("paste", e => {
+    const text = (e.clipboardData || window.clipboardData).getData("text");
+    if (!/\n/.test(text.trim()) && !/\t/.test(text)) return;
+    e.preventDefault();
+    pasteRows(r, text);
+  });
+  ["cut", "hook"].forEach(k => r.querySelector("." + k).addEventListener("input", () => resetRow(r)));
+  rowsEl.appendChild(r);
+  renumber();
+  if (data.link) { onLinkChange(r); loadInfo(r); }
+  return r;
+}
+
+// Spreadsheet row: "link<TAB>part<TAB>text", "link | part | text", or "link part".
+function parseRow(line) {
+  let parts = (line.includes("\t") ? line.split("\t") : line.split("|")).map(s => s.trim());
+  let [link, cut = "", ...rest] = parts;
+  const m = link.match(/^(\S+)\s+(.+)$/);
+  if (m) { rest = [cut, ...rest].filter(Boolean); cut = m[2]; link = m[1]; }
+  return {link, cut, hook: rest.join(" | ").trim()};
+}
+
+function pasteRows(row, text) {
+  const items = text.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith("#")).map(parseRow);
+  let target = row;
+  items.forEach((it, i) => {
+    if (i > 0) {
+      const after = rows().slice(rows().indexOf(target) + 1);
+      target = after.find(r => !r.querySelector(".link").value.trim()) || addRow();
+      if (!target) return;
+    }
+    target.querySelector(".link").value = it.link;
+    target.querySelector(".cut").value = it.cut;
+    target.querySelector(".hook").value = it.hook;
+    onLinkChange(target);
+    loadInfo(target);
+  });
+  ensureEmpty();
+  update();
+}
+
+function ensureEmpty() {
+  const rs = rows();
+  if (!rs.length || rs[rs.length - 1].querySelector(".link").value.trim()) addRow();
+}
+
+function renumber() { rows().forEach((r, i) => r.querySelector(".n").textContent = i + 1); }
+
+function onLinkChange(r) {
+  resetRow(r);
+  const link = r.querySelector(".link").value.trim();
+  r.classList.toggle("empty", !link);
+  const id = videoId(link), th = r.querySelector(".thumb");
+  if (id) { th.style.backgroundImage = `url(https://i.ytimg.com/vi/${id}/mqdefault.jpg)`; th.classList.add("has"); }
+  else { th.style.backgroundImage = ""; th.classList.remove("has"); }
+  const t = r.querySelector(".title");
+  if (!link) { t.className = "title muted"; t.textContent = "Paste a YouTube link"; delete r.dataset.infoFor; }
+  setStatus(r, link ? "idle" : null);
+  update();
+}
+
+async function loadInfo(r) {
+  const link = r.querySelector(".link").value.trim(), t = r.querySelector(".title");
+  if (!link || r.dataset.infoFor === link) return;
+  r.dataset.infoFor = link;
+  t.className = "title muted"; t.textContent = "Checking video…";
+  try {
+    const d = await post("/api/info", {link});
+    if (r.dataset.infoFor !== link) return;
+    if (d.ok) { t.className = "title"; t.innerHTML = esc(d.title) + (d.duration ? ` <span class="dur">· ${esc(d.duration)}</span>` : ""); t.title = d.title; }
+    else { t.className = "title err"; t.textContent = d.error; }
+  } catch { t.className = "title err"; t.textContent = "Can't reach Clip Maker. Is it still running?"; }
+}
+
+function resetRow(r) {
+  if (r.dataset.state === "done" || r.dataset.state === "error") {
+    delete r.dataset.job; delete r.dataset.state; delete r.dataset.file;
+    r.classList.remove("done");
+    setStatus(r, "idle");
+    update();
+  }
+}
+
+// kind: null | idle | wait | run | ok | err
+function setStatus(r, kind, text = "", progress = 0, extra = "") {
+  const s = r.querySelector(".status");
+  if (!kind) { s.innerHTML = ""; return; }
+  if (kind === "idle") { s.innerHTML = '<span class="pill"><span class="dot"></span>Ready</span>'; return; }
+  if (kind === "ok") {
+    s.innerHTML = `<div class="done-line"><span class="pill ok"><span class="dot"></span>${esc(text)}</span>` +
+      `<button class="icon-btn pv" type="button" title="Preview">${ICON_PLAY}</button>` +
+      `<a class="icon-btn" href="/download/${r.dataset.job}" title="Download">${ICON_DL}</a></div>`;
+    s.querySelector(".pv").onclick = () => openPreview(r);
+    return;
+  }
+  const pill = `<span class="pill ${kind}" title="${esc(text)}"><span class="dot"></span>${esc(text)}</span>`;
+  s.innerHTML = pill + (kind === "run" || kind === "wait" ? `<div class="bar"><i style="width:${progress}%"></i></div>` : "") + extra;
+}
+
+function friendly(status) {
+  if (/info/i.test(status)) return ["Preparing", 20];
+  if (/download/i.test(status)) return ["Downloading", 50];
+  if (/cutting|making/i.test(status)) return ["Processing", 80];
+  return [status.replace(/\.\.\.$/, ""), 10];
+}
+
+async function start(r) {
+  const link = r.querySelector(".link").value.trim();
+  if (!link || r.dataset.state === "working" || r.dataset.state === "done") return;
+  r.dataset.state = "working";
+  setStatus(r, "wait", "Queued", 5);
+  let d;
+  try {
+    d = await post("/api/clip", {link, cut:r.querySelector(".cut").value, hook:r.querySelector(".hook").value, format:"original"});
+  } catch { d = {ok:false, error:"Can't reach Clip Maker. Is it still running?"}; }
+  if (!d.ok) { fail(r, d.error); return; }
+  r.dataset.job = d.job;
+  update();
+  poll(r, d.job);
+}
+
+function fail(r, msg) {
+  r.dataset.state = "error";
+  setStatus(r, "err", "Failed");
+  const t = r.querySelector(".title");
+  t.className = "title err"; t.textContent = msg; delete r.dataset.infoFor;
+  update();
+}
+
+async function poll(r, job) {
+  if (r.dataset.job !== job || !r.isConnected) return;
+  let j;
+  try { j = await (await fetch("/api/job/" + job)).json(); }
+  catch { setTimeout(() => poll(r, job), 2500); return; }
+  if (r.dataset.job !== job) return;
+  if (j.state === "done") {
+    r.dataset.state = "done"; r.dataset.file = j.filename;
+    r.classList.add("done");
+    setStatus(r, "ok", `Done · ${j.length}s`);
+    if (j.notes && j.notes.length) r.querySelector(".status").title = j.notes.join("\n");
+    update();
+  } else if (j.state === "error") {
+    fail(r, j.status);
+  } else if (j.state === "queued") {
+    setStatus(r, "wait", /ahead/.test(j.status) ? j.status.replace("Waiting in line ", "Queued ").replace("...", "") : "Queued", 5);
+    setTimeout(() => poll(r, job), 1500);
+  } else {
+    const [label, pct] = friendly(j.status);
+    setStatus(r, "run", label, pct);
+    setTimeout(() => poll(r, job), 1200);
+  }
+}
+
+function update() {
+  const rs = rows().filter(r => r.querySelector(".link").value.trim());
+  const done = rs.filter(r => r.dataset.state === "done");
+  const working = rs.filter(r => r.dataset.state === "working");
+  const failed = rs.filter(r => r.dataset.state === "error");
+  const todo = rs.filter(r => !r.dataset.state || r.dataset.state === "error");
+  const go = $("go"), zip = $("zip");
+  go.disabled = !todo.length;
+  go.querySelector("span").textContent = todo.length > 1 ? `Make ${todo.length} clips` : todo.length ? "Make clip" : "Make clips";
+  if (done.length) {
+    zip.classList.remove("disabled");
+    zip.href = "/download-zip?jobs=" + done.map(r => r.dataset.job).join(",");
+    zip.querySelector("span").textContent = done.length > 1 ? `Download all (${done.length})` : "Download (1)";
+  } else {
+    zip.classList.add("disabled"); zip.href = "#"; zip.querySelector("span").textContent = "Download all";
+  }
+  const chips = [];
+  if (rs.length) chips.push(`<span class="chip">${rs.length} video${rs.length > 1 ? "s" : ""}</span>`);
+  if (working.length) chips.push(`<span class="chip run">${working.length} in progress</span>`);
+  if (done.length) chips.push(`<span class="chip ok">${done.length} done</span>`);
+  if (failed.length) chips.push(`<span class="chip err">${failed.length} failed</span>`);
+  $("counts").innerHTML = chips.join("");
+}
+
+function openPreview(r) {
+  if (!r.dataset.job) return;
+  $("dlgVideo").src = `/download/${r.dataset.job}?inline=1`;
+  $("dlgName").textContent = r.dataset.file || "";
+  $("dlgDl").href = `/download/${r.dataset.job}`;
+  $("dlg").showModal();
+  $("dlgVideo").play().catch(() => {});
+}
+function closePreview() { $("dlgVideo").pause(); $("dlgVideo").removeAttribute("src"); $("dlg").close(); }
+$("dlg").addEventListener("click", e => { if (e.target === $("dlg")) closePreview(); });
+$("dlg").addEventListener("cancel", () => { $("dlgVideo").pause(); });
+
+if (location.protocol === "file:") {
+  document.querySelector("main").insertAdjacentHTML("afterbegin",
+    '<p class="title err" style="white-space:normal;font-size:14px;padding:12px 14px;border:1px solid var(--err);border-radius:10px;background:var(--err-soft);margin:0 0 12px">' +
+    "This is the page file, not the running Clip Maker, so it can't make clips. " +
+    "Double-click <b>Start Clip Maker.bat</b> and open the link shown in its window.</p>");
+}
+
+$("go").onclick = () => { rows().forEach(start); update(); };
+$("add").onclick = () => { const empty = rows().find(r => !r.querySelector(".link").value.trim()) || addRow(); if (empty) empty.querySelector(".link").focus(); };
+rowsEl.addEventListener("input", update);
+addRow();
+update();
+</script>
+</body>
+</html>
