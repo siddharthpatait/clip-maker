@@ -9,7 +9,8 @@ RUN apt-get update \
 RUN useradd -m -u 1000 user
 USER user
 ENV HOME=/home/user PATH=/home/user/.local/bin:$PATH PYTHONUNBUFFERED=1 PORT=10000 \
-    WEB_WORKERS=1 YTCROP_THREADS=2
+    WEB_WORKERS=1 YTCROP_THREADS=2 \
+    YTCROP_MAX_HEIGHT=720 YTCROP_PRESET=ultrafast
 WORKDIR /home/user/app
 
 COPY --chown=user requirements.txt .

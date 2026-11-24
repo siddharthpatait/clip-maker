@@ -233,8 +233,11 @@ def check_dependencies() -> bool:
 UPDATE_HINT = "Your yt-dlp is probably out of date. Update it with:  python -m pip install -U yt-dlp"
 
 
-FORMAT_SELECTOR = ("bv*[height<=1080][ext=mp4]+ba[ext=m4a]/"
-                   "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b")
+# YTCROP_MAX_HEIGHT / YTCROP_PRESET let a slow server trade a little quality for speed.
+MAX_HEIGHT = int(os.environ.get("YTCROP_MAX_HEIGHT") or 1080)
+X264_PRESET = os.environ.get("YTCROP_PRESET") or "veryfast"
+FORMAT_SELECTOR = (f"bv*[height<={MAX_HEIGHT}][ext=mp4]+ba[ext=m4a]/"
+                   f"bv*[height<={MAX_HEIGHT}]+ba/b[height<={MAX_HEIGHT}]/bv*+ba/b")
 
 
 class _Logger:
@@ -538,7 +541,7 @@ def render(source: Path, offset: float, duration: float, out_path: Path, workdir
              "-filter_complex", filter_graph, "-map", "[v]"]
         if src["has_audio"]:
             c += ["-map", "0:a:0", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
-        c += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+        c += ["-c:v", "libx264", "-preset", X264_PRESET, "-crf", "18", "-pix_fmt", "yuv420p",
               "-profile:v", "high", "-level", "4.1", "-movflags", "+faststart"]
         if os.environ.get("YTCROP_THREADS"):        # small cloud servers: limit memory use
             c[1:1] = ["-filter_complex_threads", os.environ["YTCROP_THREADS"]]
